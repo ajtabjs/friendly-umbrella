@@ -3,22 +3,51 @@
   <head>
     <meta charset="utf-8">
     <meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Unity WebGL Player | Sakura Hime</title>
     <link rel="shortcut icon" href="TemplateData/favicon.ico">
-    <link rel="stylesheet" href="TemplateData/style.css">
-    <script src="TemplateData/UnityProgress.js"></script>
     <script src="Build/UnityLoader.js"></script>
+    <style>
+      html,
+      body {
+        width: 100%;
+        height: 100%;
+        margin: 0;
+        padding: 0;
+        overflow: hidden;
+        background: #231F20;
+      }
+
+      #unityContainer {
+        position: absolute;
+        background: transparent !important;
+      }
+
+      #unityContainer canvas {
+        position: absolute;
+        display: block;
+      }
+
+      #split-loader {
+        position: fixed;
+        left: 0;
+        top: 0;
+        right: 0;
+        bottom: 0;
+        z-index: 1000;
+        background: #231F20;
+        color: #eee;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        font: 14px/1.5 "Segoe UI", Arial, sans-serif;
+      }
+    </style>
   </head>
   <body>
-    <div class="webgl-content">
-      <div id="unityContainer" style="width: 1600px; height: 900px"></div>
-      <div class="footer">
-        <div class="webgl-logo"></div>
-        <div class="fullscreen" onclick="unityInstance.SetFullscreen(1)"></div>
-        <div class="title">Sakura Hime</div>
-      </div>
-    </div>
-    <div id="split-loader" style="position:fixed;left:0;top:0;right:0;bottom:0;z-index:1000;background:#231F20;color:#eee;display:flex;flex-direction:column;align-items:center;justify-content:center;font:14px/1.5 'Segoe UI',Arial,sans-serif">
+    <div id="unityContainer"></div>
+    <div id="split-loader">
       <div style="width:min(70vw,640px)">
         <div style="height:14px;background:rgba(255,255,255,.15);border-radius:7px;overflow:hidden">
           <div id="split-bar" style="height:100%;width:0%;background:#2196f3;transition:width .12s linear"></div>
@@ -31,11 +60,13 @@
         "use strict";
 
         var MANIFEST_URL = "Build/WebGL.parts.json";
+        var ASPECT = 900 / 1600;
 
         var overlay = document.getElementById("split-loader");
         var bar = document.getElementById("split-bar");
         var label = document.getElementById("split-text");
 
+        var instance = null;
         var state = { bytes: 0, totalBytes: 0, doneParts: 0, totalParts: 0, message: "" };
 
         function render() {
@@ -47,6 +78,68 @@
             label.textContent = "Loading part " + (state.doneParts + 1) + " of " + state.totalParts + " (" + Math.round(pct) + "%)";
           } else {
             label.textContent = "Starting game (" + Math.round(pct) + "%)";
+          }
+        }
+
+        // Fills the window with the game, letterboxing to the 16:9 stage so the picture is
+        // never stretched when the window has a different shape.
+        function onResize() {
+          var container = instance ? instance.container : document.getElementById("unityContainer");
+          if (!container) return;
+
+          var canvas = instance ? instance.Module.canvas : container.querySelector("canvas");
+          var w = window.innerWidth;
+          var h = window.innerHeight;
+
+          if (w * ASPECT > h) {
+            w = Math.min(w, Math.ceil(h / ASPECT));
+          }
+          h = Math.floor(w * ASPECT);
+
+          container.style.width = w + "px";
+          container.style.height = h + "px";
+          if (canvas) {
+            canvas.style.width = w + "px";
+            canvas.style.height = h + "px";
+          }
+          container.style.left = Math.floor((window.innerWidth - w) / 2) + "px";
+          container.style.top = Math.floor((window.innerHeight - h) / 2) + "px";
+        }
+
+        window.addEventListener("resize", onResize);
+        onResize();
+
+        var wasmBlobUrl = null;
+
+        function startGame(configUrl, wasmUrl) {
+          // Size the container first: the loader sizes the canvas from it on instantiate.
+          onResize();
+          wasmBlobUrl = wasmUrl || null;
+
+          instance = UnityLoader.instantiate("unityContainer", configUrl, {
+            Module: {
+              // The payloads are blob URLs, which the loader's own resolvers would rewrite into
+              // "Build/blob:...", so both lookups are answered here instead.
+              locateFile: function (file) {
+                if (file === "build.wasm" && wasmBlobUrl) return wasmBlobUrl;
+                return "Build/" + file;
+              },
+              resolveBuildUrl: function (url) {
+                return /^(?:https?|ftp|file|blob|data):/i.test(url)
+                  ? url
+                  : new URL(url, document.baseURI).href;
+              }
+            },
+            onerror: function (message) {
+              bar.style.background = "#d9534f";
+              label.textContent = "Failed to load: " + message;
+              if (!overlay.parentNode) document.body.appendChild(overlay);
+            }
+          });
+          window.unityInstance = instance;
+          onResize();
+          if (overlay.parentNode) {
+            overlay.parentNode.removeChild(overlay);
           }
         }
 
@@ -82,6 +175,21 @@
           return merged.buffer;
         }
 
+        // Unity's .unityweb payloads are gzip streams that a web server normally decodes via
+        // Content-Encoding. The parts are plain files, so the decoding has to happen here.
+        async function decompressIfGzip(blob, mime) {
+          var head = new Uint8Array(await blob.slice(0, 2).arrayBuffer());
+          if (head[0] !== 0x1f || head[1] !== 0x8b) return blob;
+
+          if (typeof DecompressionStream === "undefined") {
+            throw new Error("this browser cannot decode the gzip payload");
+          }
+
+          var stream = blob.stream().pipeThrough(new DecompressionStream("gzip"));
+          var buffer = await new Response(stream).arrayBuffer();
+          return new Blob([buffer], { type: mime || "application/octet-stream" });
+        }
+
         // Reassembles file.part0..file.partN into one blob URL, keeping a cached copy so
         // reloading the page does not download the parts again.
         async function loadFile(spec, cacheName, baseBytes) {
@@ -97,7 +205,7 @@
               state.bytes = baseBytes + cachedBlob.size;
               state.doneParts += spec.parts;
               render();
-              return URL.createObjectURL(cachedBlob);
+              return URL.createObjectURL(await decompressIfGzip(cachedBlob, spec.mime));
             }
           }
 
@@ -121,7 +229,8 @@
           if (cache) {
             try { await cache.put(fileUrl, new Response(blob)); } catch (e) { /* over quota: keep playing */ }
           }
-          return URL.createObjectURL(blob);
+          var playable = await decompressIfGzip(blob, spec.mime);
+          return URL.createObjectURL(playable);
         }
 
         async function loadGame() {
@@ -135,8 +244,7 @@
 
           if (!manifest || !manifest.files || manifest.files.length === 0) {
             label.textContent = "Starting game...";
-            window.unityInstance = UnityLoader.instantiate("unityContainer", jsonUrl, { onProgress: UnityProgress });
-            overlay.parentNode.removeChild(overlay);
+            startGame(jsonUrl);
             return;
           }
 
@@ -148,9 +256,11 @@
           var config = await fetch(jsonUrl, { cache: "no-cache" }).then(function (r) { return r.json(); });
 
           var baseBytes = 0;
+          var wasmUrl = null;
           for (var i = 0; i < manifest.files.length; i++) {
             var spec = manifest.files[i];
             config[spec.key] = await loadFile(spec, cacheName, baseBytes);
+            if (spec.key === "wasmCodeUrl") wasmUrl = config[spec.key];
             baseBytes += spec.bytes;
             state.bytes = baseBytes;
             render();
@@ -164,8 +274,7 @@
           render();
 
           var configUrl = URL.createObjectURL(new Blob([JSON.stringify(config)], { type: "application/json" }));
-          window.unityInstance = UnityLoader.instantiate("unityContainer", configUrl, { onProgress: UnityProgress });
-          overlay.parentNode.removeChild(overlay);
+          startGame(configUrl, wasmUrl);
         }
 
         loadGame().catch(function (err) {
