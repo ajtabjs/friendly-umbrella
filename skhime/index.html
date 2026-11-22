@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<html lang="en-us">
+  <head>
+    <meta charset="utf-8">
+    <meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+    <title>Unity WebGL Player | Sakura Hime</title>
+    <link rel="shortcut icon" href="TemplateData/favicon.ico">
+    <link rel="stylesheet" href="TemplateData/style.css">
+    <script src="TemplateData/UnityProgress.js"></script>
+    <script src="Build/UnityLoader.js"></script>
+  </head>
+  <body>
+    <div class="webgl-content">
+      <div id="unityContainer" style="width: 1600px; height: 900px"></div>
+      <div class="footer">
+        <div class="webgl-logo"></div>
+        <div class="fullscreen" onclick="unityInstance.SetFullscreen(1)"></div>
+        <div class="title">Sakura Hime</div>
+      </div>
+    </div>
+    <div id="split-loader" style="position:fixed;left:0;top:0;right:0;bottom:0;z-index:1000;background:#231F20;color:#eee;display:flex;flex-direction:column;align-items:center;justify-content:center;font:14px/1.5 'Segoe UI',Arial,sans-serif">
+      <div style="width:min(70vw,640px)">
+        <div style="height:14px;background:rgba(255,255,255,.15);border-radius:7px;overflow:hidden">
+          <div id="split-bar" style="height:100%;width:0%;background:#2196f3;transition:width .12s linear"></div>
+        </div>
+        <div id="split-text" style="margin-top:10px;text-align:center">Preparing download&hellip;</div>
+      </div>
+    </div>
+    <script>
+      (function () {
+        "use strict";
+
+        var MANIFEST_URL = "Build/WebGL.parts.json";
+
+        var overlay = document.getElementById("split-loader");
+        var bar = document.getElementById("split-bar");
+        var label = document.getElementById("split-text");
+
+        var state = { bytes: 0, totalBytes: 0, doneParts: 0, totalParts: 0, message: "" };
+
+        function render() {
+          var pct = state.totalBytes > 0 ? Math.min(100, (state.bytes / state.totalBytes) * 100) : 0;
+          bar.style.width = pct.toFixed(1) + "%";
+          if (state.message) {
+            label.textContent = state.message;
+          } else if (state.doneParts < state.totalParts) {
+            label.textContent = "Loading part " + (state.doneParts + 1) + " of " + state.totalParts + " (" + Math.round(pct) + "%)";
+          } else {
+            label.textContent = "Starting game (" + Math.round(pct) + "%)";
+          }
+        }
+
+        // Fetches a URL, reporting how many bytes have arrived so far.
+        async function fetchArrayBuffer(url, onBytes) {
+          var res = await fetch(url);
+          if (!res.ok) throw new Error("Failed to fetch " + url + " (" + res.status + ")");
+          var length = Number(res.headers.get("Content-Length")) || 0;
+
+          if (!res.body || !res.body.getReader) {
+            var whole = await res.arrayBuffer();
+            if (onBytes) onBytes(whole.byteLength);
+            return whole;
+          }
+
+          var reader = res.body.getReader();
+          var chunks = [];
+          var received = 0;
+          for (;;) {
+            var step = await reader.read();
+            if (step.done) break;
+            chunks.push(step.value);
+            received += step.value.byteLength;
+            if (onBytes) onBytes(received);
+          }
+
+          var merged = new Uint8Array(received);
+          var offset = 0;
+          for (var i = 0; i < chunks.length; i++) {
+            merged.set(chunks[i], offset);
+            offset += chunks[i].byteLength;
+          }
+          return merged.buffer;
+        }
+
+        // Reassembles file.part0..file.partN into one blob URL, keeping a cached copy so
+        // reloading the page does not download the parts again.
+        async function loadFile(spec, cacheName, baseBytes) {
+          var cache = null;
+          try { cache = await caches.open(cacheName); } catch (e) { cache = null; }
+
+          var fileUrl = new URL(spec.path, document.baseURI).href;
+
+          if (cache) {
+            var hit = await cache.match(fileUrl);
+            if (hit) {
+              var cachedBlob = await hit.blob();
+              state.bytes = baseBytes + cachedBlob.size;
+              state.doneParts += spec.parts;
+              render();
+              return URL.createObjectURL(cachedBlob);
+            }
+          }
+
+          var buffers = [];
+          var received = 0;
+          for (var i = 0; i < spec.parts; i++) {
+            var startBytes = baseBytes + received;
+            var partUrl = new URL(spec.path + ".part" + i, document.baseURI).href;
+            var buffer = await fetchArrayBuffer(partUrl, function (got) {
+              state.bytes = startBytes + got;
+              render();
+            });
+            buffers.push(buffer);
+            received += buffer.byteLength;
+            state.doneParts += 1;
+            state.bytes = baseBytes + received;
+            render();
+          }
+
+          var blob = new Blob(buffers, { type: spec.mime || "application/octet-stream" });
+          if (cache) {
+            try { await cache.put(fileUrl, new Response(blob)); } catch (e) { /* over quota: keep playing */ }
+          }
+          return URL.createObjectURL(blob);
+        }
+
+        async function loadGame() {
+          var manifest = null;
+          try {
+            var res = await fetch(MANIFEST_URL, { cache: "no-cache" });
+            if (res.ok) manifest = await res.json();
+          } catch (e) { manifest = null; }
+
+          var jsonUrl = new URL("Build/WebGL.json", document.baseURI).href;
+
+          if (!manifest || !manifest.files || manifest.files.length === 0) {
+            label.textContent = "Starting game...";
+            window.unityInstance = UnityLoader.instantiate("unityContainer", jsonUrl, { onProgress: UnityProgress });
+            overlay.parentNode.removeChild(overlay);
+            return;
+          }
+
+          var cacheName = "sakura-parts-v" + (manifest.cacheVersion || 1);
+          state.totalParts = manifest.files.reduce(function (n, f) { return n + f.parts; }, 0);
+          state.totalBytes = manifest.files.reduce(function (n, f) { return n + f.bytes; }, 0);
+          render();
+
+          var config = await fetch(jsonUrl, { cache: "no-cache" }).then(function (r) { return r.json(); });
+
+          var baseBytes = 0;
+          for (var i = 0; i < manifest.files.length; i++) {
+            var spec = manifest.files[i];
+            config[spec.key] = await loadFile(spec, cacheName, baseBytes);
+            baseBytes += spec.bytes;
+            state.bytes = baseBytes;
+            render();
+          }
+
+          ["wasmFrameworkUrl", "backgroundUrl", "asmCodeUrl", "asmMemoryUrl"].forEach(function (key) {
+            if (config[key]) config[key] = new URL(config[key], jsonUrl).href;
+          });
+
+          state.message = "Starting game...";
+          render();
+
+          var configUrl = URL.createObjectURL(new Blob([JSON.stringify(config)], { type: "application/json" }));
+          window.unityInstance = UnityLoader.instantiate("unityContainer", configUrl, { onProgress: UnityProgress });
+          overlay.parentNode.removeChild(overlay);
+        }
+
+        loadGame().catch(function (err) {
+          console.error("Failed to load Sakura Hime:", err);
+          bar.style.background = "#d9534f";
+          label.textContent = "Failed to load: " + err.message;
+        });
+      })();
+    </script>
+  </body>
+</html>
