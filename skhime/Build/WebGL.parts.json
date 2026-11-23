@@ -1,18 +1,18 @@
 {
-"cacheVersion": 3,
+"cacheVersion": 4,
 "files": [
 {
 "key": "dataUrl",
 "path": "Build/WebGL.data.unityweb",
-"parts": 4,
-"bytes": 38952637,
+"parts": 3,
+"bytes": 49312790,
 "mime": "application/octet-stream"
 },
 {
 "key": "wasmCodeUrl",
 "path": "Build/WebGL.wasm.code.unityweb",
-"parts": 2,
-"bytes": 8070120,
+"parts": 3,
+"bytes": 30067816,
 "mime": "application/wasm"
 }
 ]

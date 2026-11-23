@@ -1,1 +1,2 @@
+# the monolithic bundle is never committed; the site serves patch.part0..N + patch.parts.json
 skhime/StreamingAssets/patch
